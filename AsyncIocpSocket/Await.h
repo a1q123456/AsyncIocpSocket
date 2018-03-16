@@ -19,6 +19,7 @@ namespace Async
 	template <typename T>
 	class AwaitableState
 	{
+	public:
 		T _result;
 		bool _hasResult = false;
 		bool _hasException = false;
@@ -26,7 +27,6 @@ namespace Async
 		std::mutex mutex;
 		std::exception_ptr _exception;
 		std::condition_variable cond;
-		PTP_WORK _work = nullptr;
 	public:
 		std::vector<std::function<void()>> callback;
 		void SetResult(const T& v)
@@ -41,15 +41,20 @@ namespace Async
 			_hasResult = true;
 
 			lock.unlock();
-			_work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
+			PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
 			{
 				AwaitableState<T>* self = static_cast<AwaitableState<T>*>(Context);
+				if (self->_isReady != 0 && self->_isReady != 1)
+				{
+					DebugBreak();
+				}
 				for (const auto& fn : self->callback)
 				{
 					fn();
 				}
+
 			}, this, NULL);
-			SubmitThreadpoolWork(_work);
+			SubmitThreadpoolWork(work);
 		}
 
 		void SetResult(T&& v)
@@ -64,23 +69,15 @@ namespace Async
 			_hasResult = true;
 
 			lock.unlock();
-			_work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
+			PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
 			{
 				AwaitableState<T>* self = static_cast<AwaitableState<T>*>(Context);
-				if (self->callback.size() == 0)
-				{
-					return;
-				}
 				for (const auto& fn : self->callback)
 				{
-					if (fn)
-					{
-						fn();
-					}
-					
+					fn();
 				}
 			}, this, NULL);
-			SubmitThreadpoolWork(_work);
+			SubmitThreadpoolWork(work);
 		}
 
 		void SetException(const std::exception_ptr& exp)
@@ -95,7 +92,7 @@ namespace Async
 			_hasException = true;
 
 			lock.unlock();
-			_work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
+			PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
 			{
 				AwaitableState<T>* self = static_cast<AwaitableState<T>*>(Context);
 				for (const auto& fn : self->callback)
@@ -103,7 +100,7 @@ namespace Async
 					fn();
 				}
 			}, this, NULL);
-			SubmitThreadpoolWork(_work);
+			SubmitThreadpoolWork(work);
 		}
 
 		bool IsReady()
@@ -191,8 +188,15 @@ namespace Async
 			}
 			else
 			{
-				lock.unlock();
-				cb();
+				PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
+				{
+					AwaitableState<T>* self = static_cast<AwaitableState<T>*>(Context);
+					for (const auto& fn : self->callback)
+					{
+						fn();
+					}
+				}, this, NULL);
+				SubmitThreadpoolWork(work);
 			}
 		}
 
@@ -212,12 +216,6 @@ namespace Async
 
 		~AwaitableState() noexcept
 		{
-			std::unique_lock<std::mutex> lock(mutex);
-			if (_work != nullptr)
-			{
-				// WaitForThreadpoolWorkCallbacks(_work, TRUE);
-				CloseThreadpoolWork(_work);
-			}
 		}
 	};
 
@@ -229,7 +227,6 @@ namespace Async
 		bool _isReady = false;
 		std::exception_ptr _exception;
 		std::condition_variable cond;
-		PTP_WORK _work = nullptr;
 	public:
 		std::mutex mutex;
 		std::vector<std::function<void()>> callback;
@@ -243,7 +240,7 @@ namespace Async
 			_isReady = true;
 			_hasResult = true;
 
-			_work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
+			PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
 			{
 				AwaitableState<void>* self = static_cast<AwaitableState<void>*>(Context);
 				for (const auto& fn : self->callback)
@@ -251,7 +248,7 @@ namespace Async
 					fn();
 				}
 			}, this, NULL);
-			SubmitThreadpoolWork(_work);
+			SubmitThreadpoolWork(work);
 		}
 		
 		void SetException(const std::exception_ptr& exp)
@@ -265,7 +262,7 @@ namespace Async
 			_isReady = true;
 			_hasException = true;
 
-			_work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
+			PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
 			{
 				AwaitableState<void>* self = static_cast<AwaitableState<void>*>(Context);
 				for (const auto& fn : self->callback)
@@ -273,7 +270,7 @@ namespace Async
 					fn();
 				}
 			}, this, NULL);
-			SubmitThreadpoolWork(_work);
+			SubmitThreadpoolWork(work);
 		}
 
 		bool IsReady()
@@ -364,6 +361,7 @@ namespace Async
 			{
 				lock.unlock();
 				cb();
+				
 			}
 		}
 
@@ -383,12 +381,6 @@ namespace Async
 
 		~AwaitableState()
 		{
-			std::unique_lock<std::mutex> lock(mutex);
-			if (_work != nullptr)
-			{
-				// WaitForThreadpoolWorkCallbacks(_work, TRUE);
-				CloseThreadpoolWork(_work);
-			}
 		}
 	};
 
@@ -606,7 +598,7 @@ namespace Async
 	class Awaitable
 	{
 		using AwaitableStateType = std::shared_ptr<AwaitableState<T>>;
-		AwaitableStateType state = nullptr;;
+		AwaitableStateType state = nullptr;
 	public:
 		Awaitable() : state(std::make_shared<AwaitableState<T>>())
 		{

@@ -31,10 +31,10 @@ namespace IO::Networking::Sockets
 		ESocketType socketType;
 		EProtocolType protocol;
 		SOCKET _socket = INVALID_SOCKET;
-		PTP_IO _io = NULL;
+		PTP_IO _io = nullptr;
 		bool server_mode;
 		bool client_mode;
-
+		bool disposed = false;
 		Socket(SOCKET socket);
 	public:
 		Socket(EAddressFamily addressFamily, ESocketType addressType, EProtocolType protocol) noexcept;
@@ -45,7 +45,7 @@ namespace IO::Networking::Sockets
 		Socket(Socket&& another) noexcept;
 		void Bind(std::string ip, uint32_t port);
 		void Listen(int backlog);
-		void Connect(std::string ip, uint32_t port);
+		Async::Awaiter<int> ConnectAsync(std::string ip, uint32_t port);
 
 		Async::Awaiter<int> ReceiveAsync(std::byte* buffer, std::size_t size);
 

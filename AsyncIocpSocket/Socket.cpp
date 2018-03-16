@@ -2,6 +2,7 @@
 #include "Socket.h"
 #include "StaticMap.h"
 #include "SocketError.h"
+#include <Mswsock.h>
 
 using namespace IO::Networking::Sockets;
 
@@ -14,6 +15,7 @@ struct AsyncIoState
 {
 	Async::Awaitable<int> completionSource;
 	std::function<void()> disconnectCallback;
+	bool isConnecting;
 };
 
 struct AsyncAcceptState
@@ -46,7 +48,6 @@ void WINAPI AcceptCallback(
 	_Inout_     PTP_IO                Io
 )
 {
-
 	LPWSAOVERLAPPED wsaOverlapped = static_cast<LPWSAOVERLAPPED>(Overlapped);
 	MyOverlapped* overlapped = static_cast<MyOverlapped*>(wsaOverlapped);
 	AsyncAcceptState* state = static_cast<AsyncAcceptState*>(overlapped->state);
@@ -71,18 +72,17 @@ void WINAPI IoCallback(
 	AsyncIoState* state = static_cast<AsyncIoState*>(myOverlapped->state);
 	if (IoResult != 0)
 	{
+		state->disconnectCallback();
 		state->completionSource.SetException(std::make_exception_ptr<SocketError>(IoResult));
-		delete state;
-		delete myOverlapped;
 	}
-	if (NumberOfBytesTransferred == 0)
+	else if (NumberOfBytesTransferred == 0 && !state->isConnecting)
 	{
 		state->disconnectCallback();
 		state->completionSource.SetException(std::make_exception_ptr<SocketError>(WSAECONNRESET));
 	}
 	else
 	{
-		state->completionSource.SetResult(0);
+		state->completionSource.SetResult(NumberOfBytesTransferred);
 	}
 	
 	delete state;
@@ -109,12 +109,13 @@ IO::Networking::Sockets::Socket::Socket(EAddressFamily addressFamily, ESocketTyp
 Socket& IO::Networking::Sockets::Socket::operator=(Socket&& another) noexcept
 {
 	Dispose();
+	disposed = false;
 	client_mode = another.client_mode;
 	server_mode = another.server_mode;
-	_socket = another._socket;
 	addressFamily = another.addressFamily;
 	socketType = another.socketType;
 	protocol = another.protocol;
+	_socket = another._socket;
 	another._socket = INVALID_SOCKET;
 	_io = another._io;
 	another._io = nullptr;
@@ -122,13 +123,17 @@ Socket& IO::Networking::Sockets::Socket::operator=(Socket&& another) noexcept
 	return *this;
 }
 
-IO::Networking::Sockets::Socket::Socket(Socket && another) noexcept
+IO::Networking::Sockets::Socket::Socket(Socket&& another) noexcept
 {
 	operator=(std::move(another));
 }
 
 void IO::Networking::Sockets::Socket::Bind(std::string ip, uint32_t port)
 {
+	if (disposed)
+	{
+		throw SocketError(L"Already disposed");
+	}
 	if (_socket != INVALID_SOCKET || client_mode)
 	{
 		throw std::logic_error("cannot bind because of socket state not correct");
@@ -168,7 +173,10 @@ void IO::Networking::Sockets::Socket::Bind(std::string ip, uint32_t port)
 
 void IO::Networking::Sockets::Socket::Listen(int backlog)
 {
-
+	if (disposed)
+	{
+		throw SocketError(L"Already disposed");
+	}
 	if (_socket == INVALID_SOCKET || client_mode)
 	{
 		throw std::logic_error("cannot Listen because socket state does not correct");
@@ -183,12 +191,21 @@ void IO::Networking::Sockets::Socket::Listen(int backlog)
 	_io = CreateThreadpoolIo((HANDLE)_socket, AcceptCallback, NULL, NULL);
 }
 
-void IO::Networking::Sockets::Socket::Connect(std::string ip, uint32_t port)
+Async::Awaiter<int> IO::Networking::Sockets::Socket::ConnectAsync(std::string ip, uint32_t port)
 {
-	if (_socket != INVALID_SOCKET || server_mode)
+	if (disposed)
+	{
+		throw SocketError(L"Already disposed");
+	}
+	if (_socket != INVALID_SOCKET || server_mode || client_mode)
 	{
 		throw std::logic_error("cannot connect because of socket state not correct");
 	}
+	MyOverlapped* overlapped = new MyOverlapped;
+	ZeroMemory(overlapped, sizeof(MyOverlapped));
+	AsyncIoState* state = new AsyncIoState;
+	overlapped->state = state;
+	auto ret = state->completionSource.GetAwaiter();
 
 	addrinfo hints, *result;
 	ZeroMemory(&hints, sizeof(hints));
@@ -199,31 +216,83 @@ void IO::Networking::Sockets::Socket::Connect(std::string ip, uint32_t port)
 	int iResult = getaddrinfo(ip.c_str(), std::to_string(port).c_str(), &hints, &result);
 	if (iResult != 0) 
 	{
-		throw SocketError(iResult);
+		state->completionSource.SetException(std::make_exception_ptr<SocketError>(iResult));
+		delete state;
+		delete overlapped;
+		return ret;
 	}
 	_socket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
 	if (_socket == INVALID_SOCKET)
 	{
 		int errCode = WSAGetLastError();
 		freeaddrinfo(result);
-		throw SocketError(errCode);
+		delete state;
+		delete overlapped;
+		state->completionSource.SetException(std::make_exception_ptr<SocketError>(errCode));
+		return ret;
 	}
-	iResult = connect(_socket, result->ai_addr, (int)result->ai_addrlen);
-	if (iResult == SOCKET_ERROR) 
+	sockaddr_in addr;
+	ZeroMemory(&addr, sizeof(addr));
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = INADDR_ANY;
+	addr.sin_port = 0;
+
+	iResult = bind(_socket, (SOCKADDR*)&addr, sizeof(addr));
+	if (iResult == SOCKET_ERROR)
 	{
 		int errCode = WSAGetLastError();
-		closesocket(_socket);
 		freeaddrinfo(result);
-		throw SocketError(errCode);
+		closesocket(_socket);
+		delete state;
+		delete overlapped;
+		state->completionSource.SetException(std::make_exception_ptr<SocketError>(errCode));
+		return ret;
+	}
+	_io = CreateThreadpoolIo((HANDLE)_socket, IoCallback, NULL, NULL);
+	GUID guid = WSAID_CONNECTEX;
+	LPFN_CONNECTEX ConnectExPtr = NULL;
+	DWORD numBytes = 0;
+	if (WSAIoctl(_socket, SIO_GET_EXTENSION_FUNCTION_POINTER, &guid, sizeof(guid), &ConnectExPtr, sizeof(ConnectExPtr), &numBytes, NULL, NULL) != 0)
+	{
+		freeaddrinfo(result);
+		closesocket(_socket);
+		int errCode = WSAGetLastError();
+		delete state;
+		delete overlapped;
+		state->completionSource.SetException(std::make_exception_ptr<SocketError>(errCode));
+		return ret;
 	}
 
+	state->disconnectCallback = [=] { Dispose(); };
+	state->isConnecting = true;
 	client_mode = true;
+
+	StartThreadpoolIo(_io);
+	if (!ConnectExPtr(_socket, result->ai_addr, (int)result->ai_addrlen, NULL, 0, NULL, overlapped))
+	{
+		int errCode = WSAGetLastError();
+		if (errCode != WSA_IO_PENDING)
+		{
+			CancelThreadpoolIo(_io);
+			closesocket(_socket);
+			freeaddrinfo(result);
+			delete state;
+			delete overlapped;
+			state->completionSource.SetException(std::make_exception_ptr<SocketError>(errCode));
+			return ret;
+		}
+	}
+
 	freeaddrinfo(result);
-	_io = CreateThreadpoolIo((HANDLE)_socket, IoCallback, NULL, NULL);
+	return ret;
 }
 
 Async::Awaiter<int> IO::Networking::Sockets::Socket::ReceiveAsync(std::byte * buffer, std::size_t size)
 {
+	if (disposed)
+	{
+		throw SocketError(L"Already disposed");
+	}
 	if (_socket == INVALID_SOCKET)
 	{
 		throw std::logic_error("No connection");
@@ -232,7 +301,7 @@ Async::Awaiter<int> IO::Networking::Sockets::Socket::ReceiveAsync(std::byte * bu
 	auto retFuture = state->completionSource.GetAwaiter();
 	MyOverlapped* overlapped = new MyOverlapped;
 	ZeroMemory(overlapped, sizeof(MyOverlapped));
-	state->disconnectCallback = [=]() { this->~Socket(); };
+	state->disconnectCallback = [=]() { Dispose(); };
 	WSABUF buf;
 	buf.len = size;
 	buf.buf = reinterpret_cast<char*>(buffer);
@@ -247,6 +316,7 @@ Async::Awaiter<int> IO::Networking::Sockets::Socket::ReceiveAsync(std::byte * bu
 	{
 		if (WSAGetLastError() != WSA_IO_PENDING)
 		{
+			CancelThreadpoolIo(_io);
 			state->completionSource.SetException(std::make_exception_ptr<SocketError>(WSAGetLastError()));
 			delete state;
 			delete overlapped;
@@ -261,6 +331,10 @@ Async::Awaiter<int> IO::Networking::Sockets::Socket::ReceiveAsync(std::byte * bu
 
 Async::Awaiter<int> IO::Networking::Sockets::Socket::SendAsync(std::byte* buffer, std::size_t size)
 {
+	if (disposed)
+	{
+		throw SocketError(L"Already disposed");
+	}
 	if (_socket == INVALID_SOCKET)
 	{
 		throw std::logic_error("No connection");
@@ -269,7 +343,7 @@ Async::Awaiter<int> IO::Networking::Sockets::Socket::SendAsync(std::byte* buffer
 	auto retFuture = state->completionSource.GetAwaiter();
 	MyOverlapped* overlapped = new MyOverlapped;
 	ZeroMemory(overlapped, sizeof(MyOverlapped));
-	state->disconnectCallback = [=]() { this->~Socket(); };
+	state->disconnectCallback = [=]() { Dispose(); };
 	WSABUF buf;
 	buf.len = size;
 	buf.buf = reinterpret_cast<char*>(buffer);
@@ -283,6 +357,7 @@ Async::Awaiter<int> IO::Networking::Sockets::Socket::SendAsync(std::byte* buffer
 	{
 		if (WSAGetLastError() != WSA_IO_PENDING)
 		{
+			CancelThreadpoolIo(_io);
 			state->completionSource.SetException(std::make_exception_ptr<SocketError>(WSAGetLastError()));
 			delete state;
 			delete overlapped;
@@ -296,6 +371,10 @@ Async::Awaiter<int> IO::Networking::Sockets::Socket::SendAsync(std::byte* buffer
 
 Async::Awaiter<Socket> IO::Networking::Sockets::Socket::AcceptAsync()
 {
+	if (disposed)
+	{
+		throw SocketError(L"Already disposed");
+	}
 	if (_socket == INVALID_SOCKET)
 	{
 		throw std::logic_error("No connection");
@@ -317,12 +396,14 @@ Async::Awaiter<Socket> IO::Networking::Sockets::Socket::AcceptAsync()
 	auto retFuture = state->completionSource.GetAwaiter();
 	overlapped->state = state;
 	LPOVERLAPPED baseOverlapped = static_cast<LPOVERLAPPED>(overlapped);
+	StartThreadpoolIo(_io);
 	auto acceptRet = AcceptEx(_socket, accept_socket, buf, 0, sizeof(sockaddr_in) + 16, sizeof(sockaddr_in) + 16, NULL, baseOverlapped);
 	if (acceptRet == FALSE)
 	{
 		int errCode = WSAGetLastError();
 		if (errCode != ERROR_IO_PENDING)
 		{
+			CancelThreadpoolIo(_io);
 			state->completionSource.SetException(std::make_exception_ptr<SocketError>(errCode));
 
 			delete state;
@@ -334,7 +415,6 @@ Async::Awaiter<Socket> IO::Networking::Sockets::Socket::AcceptAsync()
 			return retFuture;
 		}
 	}
-	StartThreadpoolIo(_io);
 	return retFuture;
 }
 
@@ -347,11 +427,12 @@ void Socket::Dispose()
 		server_mode = false;
 		client_mode = false;
 	}
-	if (_io != NULL)
+	if (_io != nullptr)
 	{
 		CloseThreadpoolIo(_io);
-		_io = NULL;
+		_io = nullptr;
 	}
+	disposed = true;
 }
 
 Socket::~Socket()
