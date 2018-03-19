@@ -1,6 +1,5 @@
 #include "stdafx.h"
 #include "Socket.h"
-#include "StaticMap.h"
 #include "SocketError.h"
 #include <Mswsock.h>
 
@@ -15,7 +14,7 @@ struct AsyncIoState
 {
 	Async::Awaitable<int> completionSource;
 	std::function<void()> disconnectCallback;
-	bool isConnecting;
+	bool isConnecting = false;
 };
 
 struct AsyncAcceptState

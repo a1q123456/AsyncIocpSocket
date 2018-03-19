@@ -21,9 +21,30 @@
     <ClInclude Include="targetver.h">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="Socket.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="SocketError.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="Await.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="EAddressFamily.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="EAddressType.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="EProtocolType.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="stdafx.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="Socket.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>

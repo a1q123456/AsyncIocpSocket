@@ -19,7 +19,14 @@ namespace Async
 	template <typename T>
 	class AwaitableState
 	{
+		std::atomic_int64_t refCount = 1;
 	public:
+		struct CallbackState
+		{
+			AwaitableState* self;
+			std::function<void()> cb;
+		};
+
 		T _result;
 		bool _hasResult = false;
 		bool _hasException = false;
@@ -27,7 +34,26 @@ namespace Async
 		std::mutex mutex;
 		std::exception_ptr _exception;
 		std::condition_variable cond;
-	public:
+
+		void Accuire()
+		{
+			refCount++;
+		}
+
+		void Release()
+		{
+			if ((--refCount) == 0)
+			{
+				delete this;
+			}
+		}
+
+		AwaitableState(AwaitableState&&) = delete;
+
+		AwaitableState(const AwaitableState&) = delete;
+
+		AwaitableState() {}
+
 		std::vector<std::function<void()>> callback;
 		void SetResult(const T& v)
 		{
@@ -41,17 +67,15 @@ namespace Async
 			_hasResult = true;
 
 			lock.unlock();
+			Accuire();
 			PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
 			{
 				AwaitableState<T>* self = static_cast<AwaitableState<T>*>(Context);
-				if (self->_isReady != 0 && self->_isReady != 1)
-				{
-					DebugBreak();
-				}
 				for (const auto& fn : self->callback)
 				{
 					fn();
 				}
+				self->Release();
 
 			}, this, NULL);
 			SubmitThreadpoolWork(work);
@@ -59,16 +83,19 @@ namespace Async
 
 		void SetResult(T&& v)
 		{
-			std::unique_lock<std::mutex> lock(mutex);
-			if (_isReady)
 			{
-				throw AwaitableStateError();
-			}
-			_result = std::move(v);
-			_isReady = true;
-			_hasResult = true;
+				std::unique_lock<std::mutex> lock(mutex);
+				if (_isReady)
+				{
+					throw AwaitableStateError();
+				}
+				_result = std::move(v);
+				_isReady = true;
+				_hasResult = true;
 
-			lock.unlock();
+				Accuire();
+			}
+			
 			PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
 			{
 				AwaitableState<T>* self = static_cast<AwaitableState<T>*>(Context);
@@ -76,22 +103,26 @@ namespace Async
 				{
 					fn();
 				}
+				self->Release();
 			}, this, NULL);
 			SubmitThreadpoolWork(work);
 		}
 
 		void SetException(const std::exception_ptr& exp)
 		{
-			std::unique_lock<std::mutex> lock(mutex);
-			if (_isReady)
 			{
-				throw AwaitableStateError();
-			}
-			_exception = exp;
-			_isReady = true;
-			_hasException = true;
+				std::unique_lock<std::mutex> lock(mutex);
+				if (_isReady)
+				{
+					throw AwaitableStateError();
+				}
+				_exception = exp;
+				_isReady = true;
+				_hasException = true;
 
-			lock.unlock();
+				Accuire();
+			}
+			
 			PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
 			{
 				AwaitableState<T>* self = static_cast<AwaitableState<T>*>(Context);
@@ -99,6 +130,7 @@ namespace Async
 				{
 					fn();
 				}
+				self->Release();
 			}, this, NULL);
 			SubmitThreadpoolWork(work);
 		}
@@ -181,36 +213,59 @@ namespace Async
 
 		void AddCallback(const std::function<void()>& cb)
 		{
-			std::unique_lock<std::mutex> lock(mutex);
-			if (!_isReady)
+			bool notReady = false;
 			{
-				callback.emplace_back(cb);
+				std::unique_lock<std::mutex> lock(mutex);
+				if (!_isReady)
+				{
+					callback.emplace_back(cb);
+				}
+				else
+				{
+					notReady = true;
+				}
 			}
-			else
+			
+			if (notReady)
 			{
+				Accuire();
 				PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
 				{
-					AwaitableState<T>* self = static_cast<AwaitableState<T>*>(Context);
-					for (const auto& fn : self->callback)
-					{
-						fn();
-					}
-				}, this, NULL);
+					CallbackState* cbState = static_cast<CallbackState*>(Context);
+					cbState->cb();
+					self->Release();
+					delete cbState;
+				}, new CallbackState{ this, cb }, NULL);
 				SubmitThreadpoolWork(work);
 			}
 		}
 
 		void AddCallback(std::function<void()>&& cb)
 		{
-			std::unique_lock<std::mutex> lock(mutex);
-			if (!_isReady)
+			bool notReady = false;
 			{
-				callback.emplace_back(std::move(cb));
+				std::unique_lock<std::mutex> lock(mutex);
+				if (!_isReady)
+				{
+					callback.emplace_back(std::move(cb));
+				}
+				else
+				{
+					notReady = true;
+				}
 			}
-			else
+			
+			if (notReady)
 			{
-				lock.unlock();
-				cb();
+				Accuire();
+				PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
+				{
+					CallbackState* cbState = static_cast<CallbackState*>(Context);
+					cbState->cb();
+					cbState->self->Release();
+					delete cbState;
+				}, new CallbackState{ this, cb }, NULL);
+				SubmitThreadpoolWork(work);
 			}
 		}
 
@@ -222,24 +277,53 @@ namespace Async
 	template <>
 	class AwaitableState<void>
 	{
+		std::atomic_int64_t refCount = 1;
+	public:
+		struct CallbackState
+		{
+			AwaitableState* self;
+			std::function<void()> cb;
+		};
 		bool _hasResult = false;
 		bool _hasException = false;
 		bool _isReady = false;
 		std::exception_ptr _exception;
 		std::condition_variable cond;
-	public:
+		void Accuire()
+		{
+			refCount++;
+		}
+
+		void Release()
+		{
+			if ((--refCount) == 0)
+			{
+				delete this;
+			}
+		}
+
+		AwaitableState(AwaitableState&&) = delete;
+
+		AwaitableState(const AwaitableState&) = delete;
+
+		AwaitableState() {}
+
 		std::mutex mutex;
 		std::vector<std::function<void()>> callback;
 		void SetResult()
 		{
-			std::unique_lock<std::mutex> lock(mutex);
-			if (_isReady)
 			{
-				throw AwaitableStateError();
-			}
-			_isReady = true;
-			_hasResult = true;
+				std::unique_lock<std::mutex> lock(mutex);
+				if (_isReady)
+				{
+					throw AwaitableStateError();
+				}
+				_isReady = true;
+				_hasResult = true;
 
+				Accuire();
+			}
+			
 			PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
 			{
 				AwaitableState<void>* self = static_cast<AwaitableState<void>*>(Context);
@@ -247,21 +331,26 @@ namespace Async
 				{
 					fn();
 				}
+				self->Release();
 			}, this, NULL);
 			SubmitThreadpoolWork(work);
 		}
 		
 		void SetException(const std::exception_ptr& exp)
 		{
-			std::unique_lock<std::mutex> lock(mutex);
-			if (_isReady)
 			{
-				throw AwaitableStateError();
-			}
-			_exception = exp;
-			_isReady = true;
-			_hasException = true;
+				std::unique_lock<std::mutex> lock(mutex);
+				if (_isReady)
+				{
+					throw AwaitableStateError();
+				}
+				_exception = exp;
+				_isReady = true;
+				_hasException = true;
 
+				Accuire();
+			}
+			
 			PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
 			{
 				AwaitableState<void>* self = static_cast<AwaitableState<void>*>(Context);
@@ -269,6 +358,7 @@ namespace Async
 				{
 					fn();
 				}
+				self->Release();
 			}, this, NULL);
 			SubmitThreadpoolWork(work);
 		}
@@ -352,34 +442,63 @@ namespace Async
 
 		void AddCallback(const std::function<void()>& cb)
 		{
-			std::unique_lock<std::mutex> lock(mutex);
-			if (!_isReady)
+			bool notReady = false;
 			{
-				callback.emplace_back(cb);
+				std::unique_lock<std::mutex> lock(mutex);
+				if (!_isReady)
+				{
+					callback.emplace_back(cb);
+				}
+				else
+				{
+					notReady = true;
+				}
 			}
-			else
+			
+			if (notReady)
 			{
-				lock.unlock();
-				cb();
-				
+				Accuire();
+				PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
+				{
+					CallbackState* cbState = static_cast<CallbackState*>(Context);
+					cbState->cb();
+					cbState->self->Release();
+					delete cbState;
+				}, new CallbackState{ this, cb }, NULL);
+				SubmitThreadpoolWork(work);
 			}
 		}
 
 		void AddCallback(std::function<void()>&& cb)
 		{
-			std::unique_lock<std::mutex> lock(mutex);
-			if (!_isReady)
+			bool notReady = false;
 			{
-				callback.emplace_back(std::move(cb));
+				std::unique_lock<std::mutex> lock(mutex);
+				if (!_isReady)
+				{
+					callback.emplace_back(cb);
+				}
+				else
+				{
+					notReady = true;
+				}
 			}
-			else
+
+			if (notReady)
 			{
-				lock.unlock();
-				cb();
+				Accuire();
+				PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
+				{
+					CallbackState* cbState = static_cast<CallbackState*>(Context);
+					cbState->cb();
+					cbState->self->Release();
+					delete cbState;
+				}, new CallbackState{ this, cb }, NULL);
+				SubmitThreadpoolWork(work);
 			}
 		}
 
-		~AwaitableState()
+		~AwaitableState() noexcept
 		{
 		}
 	};
@@ -387,8 +506,8 @@ namespace Async
 	template <typename T>
 	class Awaiter
 	{
-		using AwaitableStateType = std::shared_ptr<AwaitableState<T>>;
-		AwaitableStateType state;
+		using AwaitableStateType = AwaitableState<T>;
+		AwaitableStateType* state;
 	public:
 		Awaiter(const Awaiter&) = delete;
 
@@ -399,11 +518,12 @@ namespace Async
 
 		Awaiter& operator=(Awaiter&& other)
 		{
-			state = std::move(other.state);
+			state = other.state;
+			state->Accuire();
 			return *this;
 		}
 
-		Awaiter(AwaitableStateType state) : state(state) {}
+		Awaiter(AwaitableStateType* state) : state(state) {}
 		bool await_ready()
 		{
 			return state->IsReady();
@@ -423,7 +543,8 @@ namespace Async
 
 		virtual ~Awaiter()
 		{
-
+			state->Release();
+			
 		}
 
 		void Then(std::function<void()> cb)
@@ -490,8 +611,8 @@ namespace Async
 	template <>
 	class Awaiter<void>
 	{
-		using AwaitableStateType = std::shared_ptr<AwaitableState<void>>;
-		AwaitableStateType state;
+		using AwaitableStateType = AwaitableState<void>;
+		AwaitableStateType* state;
 	public:
 		Awaiter(const Awaiter&) = delete;
 
@@ -502,10 +623,12 @@ namespace Async
 
 		Awaiter& operator=(Awaiter&& other)
 		{
-			state = std::move(other.state);
+			state = other.state;
+			state->Accuire();
+			return *this;
 		}
 
-		Awaiter(AwaitableStateType state) : state(state) {}
+		Awaiter(AwaitableStateType* state) : state(state) {}
 		bool await_ready()
 		{
 			return state->IsReady();
@@ -526,7 +649,7 @@ namespace Async
 
 		virtual ~Awaiter()
 		{
-
+			state->Release();
 		}
 
 		void Get()
@@ -597,10 +720,10 @@ namespace Async
 	template <typename T>
 	class Awaitable
 	{
-		using AwaitableStateType = std::shared_ptr<AwaitableState<T>>;
-		AwaitableStateType state = nullptr;
+		using AwaitableStateType = AwaitableState<T>;
+		AwaitableStateType* state = nullptr;
 	public:
-		Awaitable() : state(std::make_shared<AwaitableState<T>>())
+		Awaitable() : state(new AwaitableState<T>())
 		{
 		}
 
@@ -619,7 +742,8 @@ namespace Async
 
 		Awaitable& operator=(Awaitable&& _Other) noexcept
 		{
-			state = std::move(_Other.state);
+			state = _Other.state;
+			state->Accuire();
 			return *this;
 		}
 
@@ -642,21 +766,23 @@ namespace Async
 
 		Awaiter<T> GetAwaiter()
 		{
+			state->Accuire();
 			return Awaiter<T>(state);
 		}
 
 		virtual ~Awaitable()
 		{
-
+			state->Release();
 		}
 	};
 
 	template <>
 	class Awaitable<void>
 	{
-		std::shared_ptr<AwaitableState<void>> state = nullptr;;
+		using AwaitableStateType = AwaitableState<void>;
+		AwaitableStateType* state = nullptr;
 	public:
-		Awaitable() : state(std::make_shared<AwaitableState<void>>())
+		Awaitable() : state(new AwaitableState<void>())
 		{
 		}
 
@@ -675,7 +801,8 @@ namespace Async
 
 		Awaitable& operator=(Awaitable&& _Other) noexcept
 		{
-			state = std::move(_Other.state);
+			state = _Other.state;
+			state->Accuire();
 			return *this;
 		}
 
@@ -694,12 +821,13 @@ namespace Async
 
 		Awaiter<void> GetAwaiter()
 		{
+			state->Accuire();
 			return Awaiter<void>(state);
 		}
 
 		virtual ~Awaitable()
 		{
-
+			state->Release();
 		}
 	};
 }
