@@ -2,9 +2,8 @@
 A socket class provides asynchronous IO operation and `co_await` support
 
 # Compilation Requirement
-VS 2017 15.6.1 or later
-
-Windows SDK 10.0.16299.0 or later
+* VS 2017 15.6.1 or later
+* Windows SDK 10.0.16299.0 or later
 
 # Usage
 
