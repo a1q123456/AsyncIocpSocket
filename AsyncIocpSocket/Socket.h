@@ -13,7 +13,7 @@
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "Mswsock.lib")
 
-namespace IO::Networking::Sockets
+namespace Net::Sockets
 {
 	enum class ESocketLineBreak
 	{

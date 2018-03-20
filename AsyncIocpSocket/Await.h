@@ -20,6 +20,8 @@ namespace Async
 	class AwaitableState
 	{
 		std::atomic_int64_t refCount = 1;
+		PTP_WORK doneCallbackWork = nullptr;
+
 	public:
 		struct CallbackState
 		{
@@ -52,7 +54,18 @@ namespace Async
 
 		AwaitableState(const AwaitableState&) = delete;
 
-		AwaitableState() {}
+		AwaitableState() 
+		{
+			doneCallbackWork = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
+			{
+				AwaitableState<T>* self = static_cast<AwaitableState<T>*>(Context);
+				for (const auto& fn : self->callback)
+				{
+					fn();
+				}
+				self->Release();
+			}, this, NULL);
+		}
 
 		std::vector<std::function<void()>> callback;
 		void SetResult(const T& v)
@@ -68,17 +81,7 @@ namespace Async
 
 			lock.unlock();
 			Accuire();
-			PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
-			{
-				AwaitableState<T>* self = static_cast<AwaitableState<T>*>(Context);
-				for (const auto& fn : self->callback)
-				{
-					fn();
-				}
-				self->Release();
-
-			}, this, NULL);
-			SubmitThreadpoolWork(work);
+			SubmitThreadpoolWork(doneCallbackWork);
 		}
 
 		void SetResult(T&& v)
@@ -95,17 +98,8 @@ namespace Async
 
 				Accuire();
 			}
-			
-			PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
-			{
-				AwaitableState<T>* self = static_cast<AwaitableState<T>*>(Context);
-				for (const auto& fn : self->callback)
-				{
-					fn();
-				}
-				self->Release();
-			}, this, NULL);
-			SubmitThreadpoolWork(work);
+
+			SubmitThreadpoolWork(doneCallbackWork);
 		}
 
 		void SetException(const std::exception_ptr& exp)
@@ -122,17 +116,8 @@ namespace Async
 
 				Accuire();
 			}
-			
-			PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
-			{
-				AwaitableState<T>* self = static_cast<AwaitableState<T>*>(Context);
-				for (const auto& fn : self->callback)
-				{
-					fn();
-				}
-				self->Release();
-			}, this, NULL);
-			SubmitThreadpoolWork(work);
+
+			SubmitThreadpoolWork(doneCallbackWork);
 		}
 
 		bool IsReady()
@@ -213,8 +198,10 @@ namespace Async
 
 		void AddCallback(const std::function<void()>& cb)
 		{
-			bool notReady = false;
+			bool afterReady = false;
 			{
+				std::chrono::time_point t;
+				
 				std::unique_lock<std::mutex> lock(mutex);
 				if (!_isReady)
 				{
@@ -222,11 +209,11 @@ namespace Async
 				}
 				else
 				{
-					notReady = true;
+					afterReady = true;
 				}
 			}
 			
-			if (notReady)
+			if (afterReady)
 			{
 				Accuire();
 				PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
@@ -235,6 +222,7 @@ namespace Async
 					cbState->cb();
 					self->Release();
 					delete cbState;
+					CloseThreadpoolWork(Work);
 				}, new CallbackState{ this, cb }, NULL);
 				SubmitThreadpoolWork(work);
 			}
@@ -242,7 +230,7 @@ namespace Async
 
 		void AddCallback(std::function<void()>&& cb)
 		{
-			bool notReady = false;
+			bool afterReady = false;
 			{
 				std::unique_lock<std::mutex> lock(mutex);
 				if (!_isReady)
@@ -251,11 +239,11 @@ namespace Async
 				}
 				else
 				{
-					notReady = true;
+					afterReady = true;
 				}
 			}
 			
-			if (notReady)
+			if (afterReady)
 			{
 				Accuire();
 				PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
@@ -264,6 +252,7 @@ namespace Async
 					cbState->cb();
 					cbState->self->Release();
 					delete cbState;
+					CloseThreadpoolWork(Work);
 				}, new CallbackState{ this, cb }, NULL);
 				SubmitThreadpoolWork(work);
 			}
@@ -271,6 +260,10 @@ namespace Async
 
 		~AwaitableState() noexcept
 		{
+			if (doneCallbackWork != nullptr)
+			{
+				CloseThreadpoolWork(doneCallbackWork);
+			}
 		}
 	};
 
@@ -278,6 +271,7 @@ namespace Async
 	class AwaitableState<void>
 	{
 		std::atomic_int64_t refCount = 1;
+		PTP_WORK doneCallbackWork = nullptr;
 	public:
 		struct CallbackState
 		{
@@ -306,7 +300,18 @@ namespace Async
 
 		AwaitableState(const AwaitableState&) = delete;
 
-		AwaitableState() {}
+		AwaitableState() 
+		{
+			doneCallbackWork = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
+			{
+				AwaitableState<void>* self = static_cast<AwaitableState<void>*>(Context);
+				for (const auto& fn : self->callback)
+				{
+					fn();
+				}
+				self->Release();
+			}, this, NULL);
+		}
 
 		std::mutex mutex;
 		std::vector<std::function<void()>> callback;
@@ -324,16 +329,7 @@ namespace Async
 				Accuire();
 			}
 			
-			PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
-			{
-				AwaitableState<void>* self = static_cast<AwaitableState<void>*>(Context);
-				for (const auto& fn : self->callback)
-				{
-					fn();
-				}
-				self->Release();
-			}, this, NULL);
-			SubmitThreadpoolWork(work);
+			SubmitThreadpoolWork(doneCallbackWork);
 		}
 		
 		void SetException(const std::exception_ptr& exp)
@@ -350,17 +346,8 @@ namespace Async
 
 				Accuire();
 			}
-			
-			PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
-			{
-				AwaitableState<void>* self = static_cast<AwaitableState<void>*>(Context);
-				for (const auto& fn : self->callback)
-				{
-					fn();
-				}
-				self->Release();
-			}, this, NULL);
-			SubmitThreadpoolWork(work);
+
+			SubmitThreadpoolWork(doneCallbackWork);
 		}
 
 		bool IsReady()
@@ -442,7 +429,7 @@ namespace Async
 
 		void AddCallback(const std::function<void()>& cb)
 		{
-			bool notReady = false;
+			bool afterReady = false;
 			{
 				std::unique_lock<std::mutex> lock(mutex);
 				if (!_isReady)
@@ -451,11 +438,11 @@ namespace Async
 				}
 				else
 				{
-					notReady = true;
+					afterReady = true;
 				}
 			}
 			
-			if (notReady)
+			if (afterReady)
 			{
 				Accuire();
 				PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
@@ -464,6 +451,7 @@ namespace Async
 					cbState->cb();
 					cbState->self->Release();
 					delete cbState;
+					CloseThreadpoolWork(Work);
 				}, new CallbackState{ this, cb }, NULL);
 				SubmitThreadpoolWork(work);
 			}
@@ -471,7 +459,7 @@ namespace Async
 
 		void AddCallback(std::function<void()>&& cb)
 		{
-			bool notReady = false;
+			bool afterReady = false;
 			{
 				std::unique_lock<std::mutex> lock(mutex);
 				if (!_isReady)
@@ -480,11 +468,11 @@ namespace Async
 				}
 				else
 				{
-					notReady = true;
+					afterReady = true;
 				}
 			}
 
-			if (notReady)
+			if (afterReady)
 			{
 				Accuire();
 				PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
@@ -493,6 +481,7 @@ namespace Async
 					cbState->cb();
 					cbState->self->Release();
 					delete cbState;
+					CloseThreadpoolWork(Work);
 				}, new CallbackState{ this, cb }, NULL);
 				SubmitThreadpoolWork(work);
 			}
@@ -500,6 +489,10 @@ namespace Async
 
 		~AwaitableState() noexcept
 		{
+			if (doneCallbackWork != nullptr)
+			{
+				CloseThreadpoolWork(doneCallbackWork);
+			}
 		}
 	};
 
@@ -523,6 +516,8 @@ namespace Async
 			return *this;
 		}
 
+		Awaiter() : state(nullptr) {}
+
 		Awaiter(AwaitableStateType* state) : state(state) {}
 		bool await_ready()
 		{
@@ -543,8 +538,10 @@ namespace Async
 
 		virtual ~Awaiter()
 		{
-			state->Release();
-			
+			if (state != nullptr)
+			{
+				state->Release();
+			}
 		}
 
 		void Then(std::function<void()> cb)
@@ -628,6 +625,11 @@ namespace Async
 			return *this;
 		}
 
+		Awaiter(): state(nullptr)
+		{
+
+		}
+
 		Awaiter(AwaitableStateType* state) : state(state) {}
 		bool await_ready()
 		{
@@ -649,7 +651,10 @@ namespace Async
 
 		virtual ~Awaiter()
 		{
-			state->Release();
+			if (state != nullptr)
+			{
+				state->Release();
+			}
 		}
 
 		void Get()
