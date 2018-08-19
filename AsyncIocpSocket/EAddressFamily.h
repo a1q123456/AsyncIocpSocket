@@ -1,6 +1,6 @@
 #pragma once
 
-namespace IO::Networking::Sockets
+namespace Net::Sockets
 {
 	enum class EAddressFamily: int
 	{

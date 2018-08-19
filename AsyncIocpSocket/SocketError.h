@@ -2,7 +2,7 @@
 #include <string>
 #include <exception>
 
-namespace IO::Networking::Sockets
+namespace Net::Sockets
 {
 	template<typename CharT>
 	class BasicSocketError : public std::exception

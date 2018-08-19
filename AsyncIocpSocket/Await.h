@@ -39,6 +39,7 @@ namespace Async
 			_result = v;
 			_isReady = true;
 			_hasResult = true;
+			cond.notify_all();
 
 			lock.unlock();
 			PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
@@ -67,6 +68,7 @@ namespace Async
 			_result = std::move(v);
 			_isReady = true;
 			_hasResult = true;
+			cond.notify_all();
 
 			lock.unlock();
 			PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
@@ -92,6 +94,7 @@ namespace Async
 			_hasException = true;
 
 			lock.unlock();
+			cond.notify_all();
 			PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
 			{
 				AwaitableState<T>* self = static_cast<AwaitableState<T>*>(Context);
@@ -239,6 +242,7 @@ namespace Async
 			}
 			_isReady = true;
 			_hasResult = true;
+			cond.notify_all();
 
 			PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
 			{
@@ -261,6 +265,7 @@ namespace Async
 			_exception = exp;
 			_isReady = true;
 			_hasException = true;
+			cond.notify_all();
 
 			PTP_WORK work = CreateThreadpoolWork([](PTP_CALLBACK_INSTANCE Instance, PVOID Context, PTP_WORK Work)
 			{

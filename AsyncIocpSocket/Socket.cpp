@@ -1,10 +1,9 @@
 #include "stdafx.h"
 #include "Socket.h"
-#include "StaticMap.h"
 #include "SocketError.h"
 #include <Mswsock.h>
 
-using namespace IO::Networking::Sockets;
+using namespace Net::Sockets;
 
 struct MyOverlapped : public WSAOVERLAPPED
 {
@@ -89,13 +88,13 @@ void WINAPI IoCallback(
 	delete myOverlapped;
 }
 
-IO::Networking::Sockets::Socket::Socket(SOCKET socket) : _socket(socket), server_mode(false), client_mode(false)
+Net::Sockets::Socket::Socket(SOCKET socket) : _socket(socket), server_mode(false), client_mode(false)
 {
 	initializeWsa();
 	_io = CreateThreadpoolIo((HANDLE)socket, IoCallback, this, NULL);
 }
 
-IO::Networking::Sockets::Socket::Socket(EAddressFamily addressFamily, ESocketType addressType, EProtocolType protocol) noexcept :
+Net::Sockets::Socket::Socket(EAddressFamily addressFamily, ESocketType addressType, EProtocolType protocol) noexcept :
 	addressFamily(addressFamily),
 	socketType(addressType),
 	protocol(protocol),
@@ -106,9 +105,10 @@ IO::Networking::Sockets::Socket::Socket(EAddressFamily addressFamily, ESocketTyp
 	initializeWsa();
 }
 
-Socket& IO::Networking::Sockets::Socket::operator=(Socket&& another) noexcept
+Socket& Net::Sockets::Socket::operator=(Socket&& another) noexcept
 {
-	Dispose();
+	std::lock_guard<std::mutex> lock(mutex);
+	_dispose();
 	disposed = false;
 	client_mode = another.client_mode;
 	server_mode = another.server_mode;
@@ -123,16 +123,17 @@ Socket& IO::Networking::Sockets::Socket::operator=(Socket&& another) noexcept
 	return *this;
 }
 
-IO::Networking::Sockets::Socket::Socket(Socket&& another) noexcept
+Net::Sockets::Socket::Socket(Socket&& another) noexcept
 {
 	operator=(std::move(another));
 }
 
-void IO::Networking::Sockets::Socket::Bind(std::string ip, uint32_t port)
+void Net::Sockets::Socket::Bind(std::string ip, uint32_t port)
 {
+	std::lock_guard<std::mutex> lock(mutex);
 	if (disposed)
 	{
-		throw SocketError(L"Already disposed");
+		throw SocketError(_T("Already disposed"));
 	}
 	if (_socket != INVALID_SOCKET || client_mode)
 	{
@@ -171,11 +172,12 @@ void IO::Networking::Sockets::Socket::Bind(std::string ip, uint32_t port)
 	server_mode = true;
 }
 
-void IO::Networking::Sockets::Socket::Listen(int backlog)
+void Net::Sockets::Socket::Listen(int backlog)
 {
+	std::lock_guard<std::mutex> lock(mutex);
 	if (disposed)
 	{
-		throw SocketError(L"Already disposed");
+		throw SocketError(_T("Already disposed"));
 	}
 	if (_socket == INVALID_SOCKET || client_mode)
 	{
@@ -191,11 +193,12 @@ void IO::Networking::Sockets::Socket::Listen(int backlog)
 	_io = CreateThreadpoolIo((HANDLE)_socket, AcceptCallback, NULL, NULL);
 }
 
-Async::Awaiter<int> IO::Networking::Sockets::Socket::ConnectAsync(std::string ip, uint32_t port)
+Async::Awaiter<int> Net::Sockets::Socket::ConnectAsync(std::string ip, uint32_t port)
 {
+	std::lock_guard<std::mutex> lock(mutex);
 	if (disposed)
 	{
-		throw SocketError(L"Already disposed");
+		throw SocketError(_T("Already disposed"));
 	}
 	if (_socket != INVALID_SOCKET || server_mode || client_mode)
 	{
@@ -287,11 +290,12 @@ Async::Awaiter<int> IO::Networking::Sockets::Socket::ConnectAsync(std::string ip
 	return ret;
 }
 
-Async::Awaiter<int> IO::Networking::Sockets::Socket::ReceiveAsync(std::byte * buffer, std::size_t size)
+Async::Awaiter<int> Net::Sockets::Socket::ReceiveAsync(std::byte * buffer, std::size_t size)
 {
+	std::lock_guard<std::mutex> lock(mutex);
 	if (disposed)
 	{
-		throw SocketError(L"Already disposed");
+		throw SocketError(_T("Already disposed"));
 	}
 	if (_socket == INVALID_SOCKET)
 	{
@@ -329,11 +333,12 @@ Async::Awaiter<int> IO::Networking::Sockets::Socket::ReceiveAsync(std::byte * bu
 }
 
 
-Async::Awaiter<int> IO::Networking::Sockets::Socket::SendAsync(std::byte* buffer, std::size_t size)
+Async::Awaiter<int> Net::Sockets::Socket::SendAsync(std::byte* buffer, std::size_t size)
 {
+	std::lock_guard<std::mutex> lock(mutex);
 	if (disposed)
 	{
-		throw SocketError(L"Already disposed");
+		throw SocketError(_T("Already disposed"));
 	}
 	if (_socket == INVALID_SOCKET)
 	{
@@ -369,11 +374,12 @@ Async::Awaiter<int> IO::Networking::Sockets::Socket::SendAsync(std::byte* buffer
 	return retFuture;
 }
 
-Async::Awaiter<Socket> IO::Networking::Sockets::Socket::AcceptAsync()
+Async::Awaiter<Socket> Net::Sockets::Socket::AcceptAsync()
 {
+	std::lock_guard<std::mutex> lock(mutex);
 	if (disposed)
 	{
-		throw SocketError(L"Already disposed");
+		throw SocketError(_T("Already disposed"));
 	}
 	if (_socket == INVALID_SOCKET)
 	{
@@ -384,7 +390,7 @@ Async::Awaiter<Socket> IO::Networking::Sockets::Socket::AcceptAsync()
 	
 	MyOverlapped* overlapped = new MyOverlapped;
 	ZeroMemory(overlapped, sizeof(MyOverlapped));
-	//SOCKET accept_socket = accept(_socket, NULL, NULL);
+
 	SOCKET accept_socket = WSASocket(static_cast<int>(addressFamily), static_cast<int>(socketType), static_cast<int>(protocol), NULL, 0, WSA_FLAG_OVERLAPPED);
 	if (accept_socket == INVALID_SOCKET)
 	{
@@ -418,7 +424,19 @@ Async::Awaiter<Socket> IO::Networking::Sockets::Socket::AcceptAsync()
 	return retFuture;
 }
 
+bool Socket::IsConnected() const noexcept
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	return _socket != INVALID_SOCKET;
+}
+
 void Socket::Dispose()
+{
+	std::lock_guard<std::mutex> lock(mutex);
+	_dispose();
+}
+
+void Socket::_dispose()
 {
 	if (_socket != INVALID_SOCKET)
 	{
