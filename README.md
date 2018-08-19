@@ -119,12 +119,6 @@ std::byte buf[100];
 co_await socket.SendAsync(buf);
 ```
 
-### ReceiveLineAsync
-
-```c++
-auto message = co_await socket.ReceiveLineAsync();
-```
-
 ### Dispose
 
 ```c++
