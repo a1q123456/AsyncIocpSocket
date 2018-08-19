@@ -14,7 +14,7 @@ struct AsyncIoState
 {
 	Async::Awaitable<int> completionSource;
 	std::function<void()> disconnectCallback;
-	bool isConnecting;
+	bool isConnecting = false;
 };
 
 struct AsyncAcceptState
